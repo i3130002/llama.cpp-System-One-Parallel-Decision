@@ -61,8 +61,10 @@ single pass; the padding comes after the token that is read, so it doesn't chang
 
 ## POST /v1/decision
 
-`contexts` is a list of 1-256 strings. They share one schema, one set of instructions, and one cached prefix; results
-come back in the same order.
+`contexts` is a list of 1-256 strings or multimodal prompt objects. They share one schema, one set of instructions,
+and one cached prefix; results come back in the same order. For the same multimodal input forms as
+`/v1/chat/completions`, pass an object with a `content` array. It supports `text`, `image_url`, `input_audio`, and
+`input_video` parts, including the same URL, data URL, local file, and base64 handling.
 
 ```bash
 curl http://localhost:8096/v1/decision -H "Content-Type: application/json" -d '{
@@ -78,6 +80,24 @@ curl http://localhost:8096/v1/decision -H "Content-Type: application/json" -d '{
   "contexts": ["I was charged twice and need this fixed today."]
 }'
 ```
+
+An image context:
+
+```json
+{
+  "contexts": [{
+    "content": [
+      {"type": "text", "text": "Classify this image:"},
+      {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgoAAA..."}}
+    ]
+  }],
+  "schema": {
+    "category": {"type": "enum", "choices": ["cat", "dog", "other"]}
+  }
+}
+```
+
+The server inserts its configured media marker before multimodal tokenization. The client does not need to add one.
 
 ```json
 {

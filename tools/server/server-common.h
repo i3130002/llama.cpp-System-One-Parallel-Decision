@@ -39,6 +39,14 @@ using json = common_json;
 
 using raw_buffer = std::vector<uint8_t>;
 
+mtmd::input_chunks_ptr tokenize_mtmd_prompt(
+        mtmd_context * mctx,
+        const std::string & prompt,
+        const std::vector<raw_buffer> & files,
+        const mtmd_helper_init_opt & init_opt,
+        bool add_special,
+        bool is_placeholder = false);
+
 template <typename T>
 static T json_value(const json & body, const std::string & key, const T & default_value) {
     // Fallback null to default value

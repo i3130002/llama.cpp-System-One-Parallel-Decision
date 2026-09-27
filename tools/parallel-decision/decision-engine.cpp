@@ -2,6 +2,7 @@
 
 #include "chat.h"
 #include "common.h"
+#include "mtmd-helper.h"
 
 #include <algorithm>
 #include <chrono>
@@ -217,6 +218,15 @@ void engine::decode_parts(const std::vector<prompt_part> & parts) {
     llama_batch_free(batch);
 }
 
+void engine::decode_context(const context_input & context, llama_pos pos0, llama_seq_id seq) {
+    llama_pos new_pos = pos0;
+    const int rc = mtmd_helper_eval_chunks(context.mctx, ctx, context.chunks, pos0, seq,
+                                           (int) llama_n_batch(ctx), false, &new_pos);
+    if (rc != 0) {
+        throw std::runtime_error("failed to decode the multimodal decision context");
+    }
+}
+
 // Restore (or build) the cached static prefix on seq_snap. Only this engine's own sequences are
 // touched, so it can share a context with other users (e.g. server slots).
 bool engine::prepare_prefix(const tokens_t & shared, bool allow_cache) {
@@ -307,7 +317,12 @@ std::vector<std::vector<float>> engine::score_branches(const std::vector<branch>
 
 result engine::decide(const std::string & shared_text, const std::string & context_text,
                       const std::vector<field_input> & inputs, const options & opt) {
-    batch_result b = decide_batch(shared_text, { context_text }, inputs, opt);
+    return decide(shared_text, context_input{ context_text }, inputs, opt);
+}
+
+result engine::decide(const std::string & shared_text, const context_input & context,
+                      const std::vector<field_input> & inputs, const options & opt) {
+    batch_result b = decide_batch(shared_text, { context }, inputs, opt);
     result r = std::move(b.items[0]);
     r.cache_hit     = b.cache_hit;
     r.shared_tokens = b.shared_tokens;
@@ -319,6 +334,16 @@ result engine::decide(const std::string & shared_text, const std::string & conte
 
 batch_result engine::decide_batch(const std::string & shared_text, const std::vector<std::string> & contexts,
                                   const std::vector<field_input> & inputs, const options & opt) {
+    std::vector<context_input> context_inputs;
+    context_inputs.reserve(contexts.size());
+    for (const auto & context : contexts) {
+        context_inputs.push_back({ context });
+    }
+    return decide_batch(shared_text, context_inputs, inputs, opt);
+}
+
+batch_result engine::decide_batch(const std::string & shared_text, const std::vector<context_input> & contexts,
+                                  const std::vector<field_input> & inputs, const options & opt) {
     if (opt.mode != "auto" && opt.mode != "tree" && opt.mode != "greedy") {
         throw std::invalid_argument("mode must be auto, tree or greedy");
     }
@@ -326,10 +351,19 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
         throw std::invalid_argument("a decision needs at least one context");
     }
     const tokens_t shared = tokenize(shared_text, true);
-    std::vector<tokens_t> prefixes;
-    for (const auto & text : contexts) {
-        prefixes.push_back(tokenize(text, shared.empty()));
-        if (prefixes.back().empty()) {
+    std::vector<tokens_t> prefixes(contexts.size());
+    std::vector<llama_pos> context_positions(contexts.size());
+    for (size_t i = 0; i < contexts.size(); ++i) {
+        if (contexts[i].chunks != nullptr) {
+            if (contexts[i].mctx == nullptr) {
+                throw std::invalid_argument("multimodal contexts need an mtmd context");
+            }
+            context_positions[i] = mtmd_helper_get_n_pos(contexts[i].chunks);
+        } else {
+            prefixes[i] = tokenize(contexts[i].text, shared.empty());
+            context_positions[i] = (llama_pos) prefixes[i].size();
+        }
+        if (context_positions[i] == 0) {
             throw std::invalid_argument("the decision context must not be empty");
         }
     }
@@ -413,9 +447,18 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             if (!shared.empty()) {
                 llama_memory_seq_cp(mem, seq_snap, trunk, -1, -1);
             }
-            parts.push_back({ &prefixes[g0 + i], (llama_pos) shared.size(), trunk });
+            if (contexts[g0 + i].chunks == nullptr) {
+                parts.push_back({ &prefixes[g0 + i], (llama_pos) shared.size(), trunk });
+            }
         }
-        decode_parts(parts);
+        if (!parts.empty()) {
+            decode_parts(parts);
+        }
+        for (size_t i = 0; i < n_group; ++i) {
+            if (contexts[g0 + i].chunks != nullptr) {
+                decode_context(contexts[g0 + i], (llama_pos) shared.size(), seq_pool + (llama_seq_id) i);
+            }
+        }
         llama_synchronize(ctx); // llama_decode is asynchronous: wait for the prefill so its time isn't billed to scoring
         out.prefill_ms += ms_since(tp);
 
@@ -429,7 +472,7 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
             std::vector<std::pair<size_t, size_t>> owner; // (context in group, field)
             for (size_t i = 0; i < n_group; ++i) {
                 const llama_seq_id trunk = seq_pool + (llama_seq_id) i;
-                const llama_pos    pos0  = (llama_pos) (shared.size() + prefixes[g0 + i].size());
+                const llama_pos    pos0  = (llama_pos) shared.size() + context_positions[g0 + i];
                 for (size_t f = 0; f < state[i].size(); ++f) {
                     auto & fd = state[i][f];
                     if (fd.use_tree) {
@@ -487,7 +530,9 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
         for (size_t i = 0; i < n_group; ++i) {
             llama_memory_seq_rm(mem, seq_pool + (llama_seq_id) i, -1, -1);
             result & r = out.items[g0 + i];
-            r.context_tokens = prefixes[g0 + i].size();
+            r.context_tokens = contexts[g0 + i].chunks != nullptr
+                ? mtmd_helper_get_n_tokens(contexts[g0 + i].chunks)
+                : prefixes[g0 + i].size();
             r.rows           = total;
             for (auto & fd : state[i]) {
                 if (fd.use_tree && fd.probs.empty()) {

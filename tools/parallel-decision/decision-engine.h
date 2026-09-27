@@ -12,6 +12,7 @@
 
 #include "llama.h"
 #include "json.h"
+#include "mtmd.h"
 
 #include <string>
 #include <utility>
@@ -34,6 +35,12 @@ struct options {
     size_t      tree_max       = 128;
     bool        split_boundary = false;  // legacy: tokenise suffix and values separately
     bool        allow_cache    = true;   // reuse the cached static prefix when it matches
+};
+
+struct context_input {
+    std::string text;
+    const mtmd_input_chunks * chunks = nullptr;
+    mtmd_context * mctx = nullptr;
 };
 
 struct field_result {
@@ -76,10 +83,14 @@ class engine {
 
     result decide(const std::string & shared_text, const std::string & context_text,
                   const std::vector<field_input> & fields, const options & opt);
+    result decide(const std::string & shared_text, const context_input & context,
+                  const std::vector<field_input> & fields, const options & opt);
 
     // Contexts are prefilled together and their branches scored together, in groups sized to fit
     // the sequence budget; results keep the order of the contexts.
     batch_result decide_batch(const std::string & shared_text, const std::vector<std::string> & contexts,
+                              const std::vector<field_input> & fields, const options & opt);
+    batch_result decide_batch(const std::string & shared_text, const std::vector<context_input> & contexts,
                               const std::vector<field_input> & fields, const options & opt);
 
   private:
@@ -105,6 +116,7 @@ class engine {
 
     tokens_t tokenize(const std::string & text, bool add_special) const;
     void     decode_parts(const std::vector<prompt_part> & parts);
+    void     decode_context(const context_input & context, llama_pos pos0, llama_seq_id seq);
     bool     prepare_prefix(const tokens_t & shared, bool allow_cache);
     std::vector<std::vector<float>> score_branches(const std::vector<branch> & branches, llama_seq_id first, int n_free);
 };

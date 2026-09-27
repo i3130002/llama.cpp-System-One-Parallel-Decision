@@ -9,6 +9,7 @@
 
 #include "build-info.h"
 #include "common.h"
+#include "base64.hpp"
 #include "fit.h"
 #include "llama.h"
 #include "log.h"
@@ -2385,14 +2386,66 @@ private:
         }
         // one decision per context; all contexts share the schema, the instructions and the cached prefix
         if (!body.contains("contexts") || !body.at("contexts").is_array() || body.at("contexts").empty() || body.at("contexts").size() > 256) {
-            throw std::invalid_argument("\"contexts\" must be an array of 1-256 strings");
+            throw std::invalid_argument("\"contexts\" must be an array of 1-256 strings or multimodal prompt objects");
         }
         std::vector<std::string> contexts;
-        for (const auto & c : body.at("contexts")) {
-            if (!c.is_string() || c.get<std::string>().empty()) {
-                throw std::invalid_argument("every entry of \"contexts\" must be a non-empty string");
+        std::vector<std::vector<raw_buffer>> context_files;
+        context_files.reserve(body.at("contexts").size());
+        const auto render_decision_content = [](const common_chat_msg & message) {
+            if (!message.content.empty()) {
+                return message.content;
             }
-            contexts.push_back(c.get<std::string>());
+            std::string content;
+            for (const auto & part : message.content_parts) {
+                if (!content.empty()) {
+                    content += "\n\n";
+                }
+                content += part.text;
+            }
+            return content;
+        };
+        for (const auto & c : body.at("contexts")) {
+            if (c.is_string()) {
+                if (c.get<std::string>().empty()) {
+                    throw std::invalid_argument("every string in \"contexts\" must be non-empty");
+                }
+                contexts.push_back(c.get<std::string>());
+                context_files.emplace_back();
+                continue;
+            }
+            if (c.is_object() && c.contains("content")) {
+                json chat_body = {
+                    { "messages", json::array({
+                        json{{ "role", "user" }, { "content", c.at("content") }}
+                    }) }
+                };
+                context_files.emplace_back();
+                oaicompat_chat_params_parse(chat_body, chat_params, context_files.back());
+                const auto messages = common_chat_msgs_parse_oaicompat(chat_body.at("messages"));
+                if (messages.size() != 1 || messages[0].empty()) {
+                    throw std::invalid_argument("multimodal decision content must contain one non-empty user message");
+                }
+                contexts.push_back(render_decision_content(messages[0]));
+                continue;
+            }
+            if (!c.is_object() || !c.contains("prompt_string") || !c.at("prompt_string").is_string() ||
+                c.at("prompt_string").get<std::string>().empty() || !c.contains("multimodal_data") ||
+                !c.at("multimodal_data").is_array() || c.at("multimodal_data").empty()) {
+                throw std::invalid_argument("contexts must be strings, prompt objects, or objects with OpenAI content");
+            }
+            contexts.push_back(c.at("prompt_string").get<std::string>());
+            context_files.emplace_back();
+            for (const auto & image : c.at("multimodal_data")) {
+                if (!image.is_string()) {
+                    throw std::invalid_argument("every multimodal_data entry must be base64 text");
+                }
+                const std::string decoded = base64::decode(image.get<std::string>());
+                if (decoded.empty()) {
+                    throw std::invalid_argument("multimodal_data contains invalid base64");
+                }
+                raw_buffer data(decoded.begin(), decoded.end());
+                context_files.back().push_back(std::move(data));
+            }
         }
         if (!body.contains("schema")) {
             throw std::invalid_argument("\"schema\" must be provided");
@@ -2404,7 +2457,12 @@ private:
         const auto cs = llama_decision::compile_schema(body.at("schema"), body.value("instructions", std::string()));
         std::string shared;
         std::vector<std::string> dynamic;
+        std::vector<llama_decision::context_input> decision_contexts;
+        std::vector<mtmd::input_chunks_ptr> context_chunks;
+        decision_contexts.reserve(contexts.size());
+        context_chunks.reserve(contexts.size());
         for (const auto & c : contexts) {
+            const size_t i = dynamic.size();
             auto [head, tail] = llama_decision::render_prompt(chat_params.tmpls.get(), chat_params.use_jinja, cs.system_text, c);
             if (dynamic.empty()) {
                 shared = head;
@@ -2412,13 +2470,22 @@ private:
                 throw std::runtime_error("the chat template renders a different prefix per context");
             }
             dynamic.push_back(tail);
+            if (!context_files[i].empty()) {
+                if (mctx == nullptr) {
+                    throw std::runtime_error("multimodal data provided, but this model has no vision projector");
+                }
+                context_chunks.push_back(tokenize_mtmd_prompt(mctx, tail, context_files[i], init_opt, shared.empty()));
+                decision_contexts.push_back({ tail, context_chunks.back().get(), mctx });
+            } else {
+                decision_contexts.push_back({ tail });
+            }
         }
         llama_decision::options opt;
         opt.mode        = body.value("mode", std::string("auto"));
         opt.tree_max    = (size_t) body.value("tree_max", 128);
         opt.allow_cache = body.value("cache_prompt", true);
 
-        const auto b = decision_engine->decide_batch(shared, dynamic, cs.inputs, opt);
+        const auto b = decision_engine->decide_batch(shared, decision_contexts, cs.inputs, opt);
 
         size_t context_tokens = 0;
         for (const auto & r : b.items) {

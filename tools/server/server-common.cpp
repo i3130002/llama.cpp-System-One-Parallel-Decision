@@ -933,6 +933,18 @@ server_tokens process_mtmd_prompt(
         const std::vector<raw_buffer> & files,
         const mtmd_helper_init_opt & init_opt,
         bool is_placeholder) {
+    auto chunks = tokenize_mtmd_prompt(mctx, prompt, files, init_opt, true, is_placeholder);
+    mtmd::input_chunks input_chunks(chunks.release());
+    return server_tokens(input_chunks, true);
+}
+
+mtmd::input_chunks_ptr tokenize_mtmd_prompt(
+        mtmd_context * mctx,
+        const std::string & prompt,
+        const std::vector<raw_buffer> & files,
+        const mtmd_helper_init_opt & init_opt,
+        bool add_special,
+        bool is_placeholder) {
     // these will be freed upon going out of scope
     mtmd::bitmaps bitmaps;
     std::vector<mtmd_helper::video_ptr> videos;
@@ -952,21 +964,20 @@ server_tokens process_mtmd_prompt(
     mtmd_input_text inp_txt = {
         prompt.data(),
         prompt.size(),
-        /* add_special */   true,
+        /* add_special */   add_special,
         /* parse_special */ true,
     };
-    mtmd::input_chunks chunks(mtmd_input_chunks_init());
+    mtmd::input_chunks_ptr chunks(mtmd_input_chunks_init());
     auto bitmaps_c_ptr = bitmaps.c_ptr();
     int32_t tokenized = mtmd_tokenize(mctx,
-                                      chunks.ptr.get(),
+                                      chunks.get(),
                                       &inp_txt,
                                       bitmaps_c_ptr.data(),
                                       bitmaps_c_ptr.size());
     if (tokenized != 0) {
         throw std::runtime_error("Failed to tokenize prompt");
     }
-    auto result = server_tokens(chunks, true);
-    return result;
+    return chunks;
 }
 
 /**
