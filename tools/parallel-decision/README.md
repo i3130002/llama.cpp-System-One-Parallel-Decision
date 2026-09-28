@@ -141,6 +141,11 @@ Numeric fields take `aggregate`: `mode` (default), `median` or `mean`.
 | `mode` | `auto` | `tree` scores every divergence node and returns exact probabilities; `greedy` walks the trie; `auto` picks tree up to `tree_max` values |
 | `tree_max` | 128 | per-field switch between tree and greedy |
 | `cache_prompt` | true | reuse the cached instructions + schema prefix |
+| `include_probabilities` | false | return the probability for every allowed value |
+| `include_tree` | false | return the scored token tree for tree-mode fields |
+
+Set `include_probabilities` to return the complete distribution and the derived confidence. Set
+`include_tree` to also return the token-level scoring nodes for fields evaluated in tree mode.
 
 ## CLI
 

@@ -2484,6 +2484,8 @@ private:
         opt.mode        = body.value("mode", std::string("auto"));
         opt.tree_max    = (size_t) body.value("tree_max", 128);
         opt.allow_cache = body.value("cache_prompt", true);
+        const bool include_probabilities = body.value("include_probabilities", false);
+        const bool include_tree         = body.value("include_tree", false);
 
         const auto b = decision_engine->decide_batch(shared, decision_contexts, cs.inputs, opt);
 
@@ -2505,7 +2507,7 @@ private:
 
         json results = json::array();
         for (const auto & r : b.items) {
-            json item = llama_decision::assemble(cs, r);
+            json item = llama_decision::assemble(cs, r, include_probabilities, include_tree);
             item["usage"] = { { "context_tokens", (long long) r.context_tokens }, { "scored_rows", r.rows } };
             results.push_back(item);
         }

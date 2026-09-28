@@ -153,3 +153,32 @@ a.out.*
 
 AGENTS.local.md
 .pi/SYSTEM.md
+CMakeFiles/
+
+# In-source CMake/Ninja output
+/CMakeCache.txt
+/build.ninja
+/.ninja_deps
+/.ninja_log
+/cmake_install.cmake
+/compile_commands.json
+**/cmake_install.cmake
+
+# Generated package and version files
+/license.cpp
+/llama-config.cmake
+/llama-config-version.cmake
+/llama.pc
+/ggml/ggml-config.cmake
+/ggml/ggml-config-version.cmake
+/ggml/src/ggml-version.h
+/src/llama-version.h
+
+# Generated UI bundle
+/tools/ui/.ui-embed.sha256
+/tools/ui/.ui-stamp
+/tools/ui/dist.tar.gz
+/tools/ui/dist.tar.gz.sha256
+/tools/ui/ui-gzip/
+/tools/ui/ui.cpp
+/tools/ui/ui.h

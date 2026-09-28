@@ -49,6 +49,13 @@ struct field_result {
     int                scored_nodes = 0;
     bool               tree         = false;
     std::vector<float> probs;            // tree fields: probability of every allowed value
+
+    struct tree_node {
+        std::string prefix;
+        std::vector<std::string> options;
+        std::vector<float> probs;
+    };
+    std::vector<tree_node> tree_nodes;
 };
 
 struct result {
@@ -150,6 +157,6 @@ std::pair<std::string, std::string> render_prompt(const common_chat_templates * 
                                                   const std::string & system_text, const std::string & context);
 
 // {"decision": {...}, "fields": {...}} from the scores, applying each numeric field's aggregate.
-common_json assemble(const compiled_schema & cs, const result & r);
+common_json assemble(const compiled_schema & cs, const result & r, bool include_probabilities, bool include_tree);
 
 } // namespace llama_decision

@@ -29,6 +29,7 @@ struct decision_field {
     std::vector<tokens_t> node_prefix;   // tree: trie nodes with more than one allowed next token
     std::vector<tokens_t> node_options;
     std::vector<float>    probs;
+    std::vector<std::vector<float>> tree_probs;
 
     bool  use_tree     = false;
     int   winner       = -1;
@@ -167,6 +168,7 @@ struct decision_field {
         winner       = best;
         path_score   = probs[best];
         scored_nodes = (int) node_prefix.size();
+        tree_probs   = node_logp;
     }
 };
 
@@ -538,7 +540,26 @@ batch_result engine::decide_batch(const std::string & shared_text, const std::ve
                 if (fd.use_tree && fd.probs.empty()) {
                     fd.finish_tree({});
                 }
-                r.fields.push_back({ fd.winner, fd.path_score, fd.scored_nodes, fd.use_tree, fd.probs });
+                field_result field;
+                field.winner       = fd.winner;
+                field.path_score   = fd.path_score;
+                field.scored_nodes = fd.scored_nodes;
+                field.tree         = fd.use_tree;
+                field.probs        = fd.probs;
+                for (size_t n = 0; n < fd.node_prefix.size(); ++n) {
+                    field_result::tree_node node;
+                    for (llama_token token : fd.node_prefix[n]) {
+                        node.prefix += common_token_to_piece(vocab, token, true);
+                    }
+                    for (llama_token token : fd.node_options[n]) {
+                        node.options.push_back(common_token_to_piece(vocab, token, true));
+                    }
+                    if (n < fd.tree_probs.size()) {
+                        node.probs = fd.tree_probs[n];
+                    }
+                    field.tree_nodes.push_back(std::move(node));
+                }
+                r.fields.push_back(std::move(field));
             }
         }
         out.scoring_ms += ms_since(ts);
@@ -733,7 +754,7 @@ std::pair<std::string, std::string> render_prompt(const common_chat_templates * 
     return { prompt.substr(0, at), context + prompt.substr(at + sentinel.size()) + "{\n" };
 }
 
-common_json assemble(const compiled_schema & cs, const result & r) {
+common_json assemble(const compiled_schema & cs, const result & r, bool include_probabilities, bool include_tree) {
     common_json decision = common_json::object();
     common_json fields   = common_json::object();
     for (size_t i = 0; i < cs.specs.size(); ++i) {
@@ -782,7 +803,41 @@ common_json assemble(const compiled_schema & cs, const result & r) {
         }
         decision[sp.name] = sp.values[idx];
         f["value"]        = sp.values[idx];
-        f["probability"]  = (double) (fr.probs.size() == sp.values.size() ? fr.probs[idx] : fr.path_score);
+        const bool has_distribution = fr.probs.size() == sp.values.size();
+        f["probability"] = (double) (has_distribution ? fr.probs[idx] : fr.path_score);
+        if ((include_probabilities || include_tree) && has_distribution) {
+            const float max_probability = *std::max_element(fr.probs.begin(), fr.probs.end());
+            const double confidence = sp.values.size() == 1
+                ? 1.0
+                : (sp.values.size() * max_probability - 1.0) / (sp.values.size() - 1.0);
+            f["confidence"] = std::clamp(confidence, 0.0, 1.0);
+        }
+        if (include_probabilities && has_distribution) {
+            common_json probabilities = common_json::object();
+            for (size_t k = 0; k < sp.values.size(); ++k) {
+                const std::string key = sp.values[k].is_string()
+                    ? sp.values[k].get<std::string>()
+                    : sp.values[k].dump();
+                probabilities[key] = fr.probs[k];
+            }
+            f["probabilities"] = probabilities;
+        }
+        if (include_tree && fr.tree) {
+            common_json nodes = common_json::array();
+            for (const auto & node : fr.tree_nodes) {
+                common_json options = common_json::array();
+                for (size_t k = 0; k < node.options.size(); ++k) {
+                    common_json option = common_json::object();
+                    option["token"] = node.options[k];
+                    if (k < node.probs.size()) {
+                        option["probability"] = std::exp(node.probs[k]);
+                    }
+                    options.push_back(option);
+                }
+                nodes.push_back({ { "prefix", node.prefix }, { "options", options } });
+            }
+            f["tree_nodes"] = nodes;
+        }
         f["scored_nodes"] = fr.scored_nodes;
         f["tree"]         = fr.tree;
         fields[sp.name]   = f;
